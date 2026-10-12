@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.25)
+project(SecYS LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(unofficial-sodium CONFIG REQUIRED)
+add_executable(secys_cli client_cli/main.cpp)
+target_link_libraries(secys_cli PRIVATE unofficial-sodium::sodium)
