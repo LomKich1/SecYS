@@ -122,7 +122,7 @@ bool send_message(const unsigned char *my_pk, const unsigned char *my_sk, const 
     std::ofstream out(out_path, std::ios::binary);
     if (!out)
     {
-        std::cerr << "Cannot open output file " << std::endl;
+        std::cerr << "Cannot open output file" << std::endl;
         return false;
     }
 
@@ -158,7 +158,7 @@ bool recv_message(const unsigned char *my_sk, const std::string &in_path)
     std::ifstream in(in_path, std::ios::binary);
     if (!in)
     {
-        std::cerr << "Cannto open message file" << std::endl;
+        std::cerr << "Cannot read message file" << std::endl;
         return false;
     }
 
@@ -240,12 +240,18 @@ int main(int argc, char *argv[])
         std::cout << "Message written to " << argv[5] << std::endl;
     }
 
-    if (argc == 4 && std::string(argv[2]) == "recv")
+    else if (argc == 4 && std::string(argv[2]) == "recv")
     {
         if (!recv_message(sk, argv[3]))
         {
             return 1;
         }
+    }
+
+    else if (argc > 2)
+    {
+        std::cerr << "Usage: secys_cli <identity> send <their-pk-hex> <text> <out-file>\n" << "       secys_cli <identity> recv <in-file>" << std::endl;
+        return 1;
     }
 
     sodium_memzero(sk, sizeof(sk));
