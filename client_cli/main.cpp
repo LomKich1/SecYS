@@ -3,6 +3,7 @@
 #include <string>
 #include <fstream>
 #include <vector>
+#include <filesystem>
 
 bool derive_key(const std::string &password, const unsigned char *salt, unsigned char *key)
 {
@@ -12,7 +13,6 @@ bool derive_key(const std::string &password, const unsigned char *salt, unsigned
                          crypto_pwhash_MEMLIMIT_INTERACTIVE,
                          crypto_pwhash_ALG_ARGON2ID13) == 0;
 }
-
 bool load_identity(const std::string &path, unsigned char *pk, unsigned char *sk)
 {
     std::ifstream in(path, std::ios::binary);
@@ -55,7 +55,6 @@ bool load_identity(const std::string &path, unsigned char *pk, unsigned char *sk
     }
     return true;
 }
-
 bool create_identity(const std::string &path, unsigned char *pk, unsigned char *sk)
 {
     crypto_box_keypair(pk, sk);
@@ -99,83 +98,94 @@ bool create_identity(const std::string &path, unsigned char *pk, unsigned char *
     }
     return true;
 }
-
-bool demo_message()
-{
-    unsigned char alice_pk[crypto_box_PUBLICKEYBYTES];
-    unsigned char alice_sk[crypto_box_SECRETKEYBYTES];
-    unsigned char bob_pk[crypto_box_PUBLICKEYBYTES];
-    unsigned char bob_sk[crypto_box_SECRETKEYBYTES];
-    crypto_box_keypair(alice_pk, alice_sk);
-    crypto_box_keypair(bob_pk, bob_sk);
-
-    const std::string message = "Hello, Bob!";
-
-    unsigned char nonce[crypto_box_NONCEBYTES];
-    randombytes_buf(nonce, sizeof(nonce));
-
-    std::vector<unsigned char> encrypted(crypto_box_MACBYTES + message.size());
-    if (crypto_box_easy(encrypted.data(),
-                        reinterpret_cast<const unsigned char *>(message.c_str()),
-                        message.size(),
-                        nonce, bob_pk, alice_sk) != 0)
-    {
-        std::cerr << "Encryption failed" << std::endl;
-        return false;
-    }
-
-    std::vector<unsigned char> decrypted(message.size());
-    if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(),
-
-                            nonce, alice_pk, bob_sk) != 0)
-    {
-        std::cerr << "Message was forged or damaged" << std::endl;
-        return false;
-    }
-
-    std::string text(decrypted.begin(), decrypted.end());
-    std::cout << "Bob read: " << text << std::endl;
-    return true;
-}
-
 bool send_message(const unsigned char *my_pk, const unsigned char *my_sk, const std::string &their_pk_hex, const std::string &text, const std::string &out_path)
 {
     unsigned char their_pk[crypto_box_PUBLICKEYBYTES];
     size_t decoded_len = 0;
     if (sodium_hex2bin(their_pk, sizeof(their_pk), their_pk_hex.c_str(), their_pk_hex.size(), nullptr, &decoded_len, nullptr) != 0 ||
-decoded_len != crypto_box_PUBLICKEYBYTES)
-{
-    std::cerr << "Invalid public key (need 64 hex characters)" << std::endl;
-    return false;
-}
+        decoded_len != crypto_box_PUBLICKEYBYTES)
+    {
+        std::cerr << "Invalid public key (need 64 hex characters)" << std::endl;
+        return false;
+    }
 
-unsigned char nonce[crypto_box_NONCEBYTES];
-randombytes_buf(nonce, sizeof(nonce));
+    unsigned char nonce[crypto_box_NONCEBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
 
-std::vector<unsigned char> encrypted(crypto_box_MACBYTES + text.size());
-if (crypto_box_easy(encrypted.data(), reinterpret_cast<const unsigned char *>(text.c_str()), text.size(), nonce, their_pk, my_sk) != 0)
-{
-    std::cerr << "Encryption falied" << std::endl;
-    return false;
-}
+    std::vector<unsigned char> encrypted(crypto_box_MACBYTES + text.size());
+    if (crypto_box_easy(encrypted.data(), reinterpret_cast<const unsigned char *>(text.c_str()), text.size(), nonce, their_pk, my_sk) != 0)
+    {
+        std::cerr << "Encryption failed" << std::endl;
+        return false;
+    }
 
-std::ofstream out(out_path, std::ios::binary);
+    std::ofstream out(out_path, std::ios::binary);
     if (!out)
     {
-    std::cerr << "Cannot open output file " << std::endl;
-    return false;
+        std::cerr << "Cannot open output file " << std::endl;
+        return false;
     }
 
     out.write(reinterpret_cast<const char *>(my_pk), crypto_box_PUBLICKEYBYTES);
     out.write(reinterpret_cast<const char *>(nonce), sizeof(nonce));
     out.write(reinterpret_cast<const char *>(encrypted.data()),
               static_cast<std::streamsize>(encrypted.size()));
-              out.close();
+    out.close();
     if (!out)
     {
         std::cerr << "Failed to write output file" << std::endl;
         return false;
     }
+    return true;
+}
+bool recv_message(const unsigned char *my_sk, const std::string &in_path)
+{
+    std::error_code ec;
+    const std::uintmax_t total = std::filesystem::file_size(in_path, ec);
+    if (ec)
+    {
+        std::cerr << "Cannot read file message" << std::endl;
+        return false;
+    }
+
+    const std::uintmax_t header = crypto_box_PUBLICKEYBYTES + crypto_box_NONCEBYTES;
+    if (total < header + crypto_box_MACBYTES)
+    {
+        std::cerr << "Message file too short" << std::endl;
+        return false;
+    }
+
+    std::ifstream in(in_path, std::ios::binary);
+    if (!in)
+    {
+        std::cerr << "Cannto open message file" << std::endl;
+        return false;
+    }
+
+    unsigned char sender_pk[crypto_box_PUBLICKEYBYTES];
+    unsigned char nonce[crypto_box_NONCEBYTES];
+    std::vector<unsigned char> encrypted(static_cast<size_t>(total - header));
+
+    in.read(reinterpret_cast<char *>(sender_pk), sizeof(sender_pk));
+    in.read(reinterpret_cast<char *>(nonce), sizeof(nonce));
+    in.read(reinterpret_cast<char *>(encrypted.data()), static_cast<std::streamsize>(encrypted.size()));
+    if (!in)
+    {
+        std::cerr << "Message file is damaged" << std::endl;
+        return false;
+    }
+
+    std::vector<unsigned char> decrypted(encrypted.size() - crypto_box_MACBYTES);
+    if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(), nonce, sender_pk, my_sk) != 0)
+    {
+        std::cerr << "Message was forged or damaged" << std::endl;
+        return false;
+    }
+
+    char sender_hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
+    sodium_bin2hex(sender_hex, sizeof(sender_hex), sender_pk, sizeof(sender_pk));
+    std::cout << "From: " << sender_hex << std::endl;
+    std::cout << "Message: " << std::string(decrypted.begin(), decrypted.end()) << std::endl;
     return true;
 }
 
@@ -223,16 +233,19 @@ int main(int argc, char *argv[])
 
     if (argc == 6 && std::string(argv[2]) == "send")
     {
-        if (send_message(pk, sk, argv[3], argv[4], argv[5]))
+        if (!send_message(pk, sk, argv[3], argv[4], argv[5]))
         {
             return 1;
         }
         std::cout << "Message written to " << argv[5] << std::endl;
     }
 
-    if (!demo_message())
+    if (argc == 4 && std::string(argv[2]) == "recv")
     {
-        return 1;
+        if (!recv_message(sk, argv[3]))
+        {
+            return 1;
+        }
     }
 
     sodium_memzero(sk, sizeof(sk));
