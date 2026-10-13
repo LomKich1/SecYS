@@ -124,8 +124,6 @@ bool demo_message()
         return false;
     }
 
-    encrypted[0] = 0; // Just to avoid unused variable warning
-
     std::vector<unsigned char> decrypted(message.size());
     if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(),
 
@@ -175,7 +173,10 @@ int main()
     sodium_bin2hex(pk_hex, sizeof(pk_hex), pk, sizeof(pk));
     std::cout << "Identity ready. Public Key: " << pk_hex << std::endl;
 
-    demo_message();
+    if (!demo_message())
+    {
+        return 1;
+    }
 
     sodium_memzero(sk, sizeof(sk));
     return 0;
