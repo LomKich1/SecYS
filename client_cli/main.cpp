@@ -127,7 +127,7 @@ bool demo_message()
     std::vector<unsigned char> decrypted(message.size());
     if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(),
 
-                             nonce, alice_pk, bob_sk) != 0)
+                            nonce, alice_pk, bob_sk) != 0)
     {
         std::cerr << "Message was forged or damaged" << std::endl;
         return false;
@@ -135,6 +135,47 @@ bool demo_message()
 
     std::string text(decrypted.begin(), decrypted.end());
     std::cout << "Bob read: " << text << std::endl;
+    return true;
+}
+
+bool send_message(const unsigned char *my_pk, const unsigned char *my_sk, const std::string &their_pk_hex, const std::string &text, const std::string &out_path)
+{
+    unsigned char their_pk[crypto_box_PUBLICKEYBYTES];
+    size_t decoded_len = 0;
+    if (sodium_hex2bin(their_pk, sizeof(their_pk), their_pk_hex.c_str(), their_pk_hex.size(), nullptr, &decoded_len, nullptr) != 0 ||
+decoded_len != crypto_box_PUBLICKEYBYTES)
+{
+    std::cerr << "Invalid public key (need 64 hex characters)" << std::endl;
+    return false;
+}
+
+unsigned char nonce[crypto_box_NONCEBYTES];
+randombytes_buf(nonce, sizeof(nonce));
+
+std::vector<unsigned char> encrypted(crypto_box_MACBYTES + text.size());
+if (crypto_box_easy(encrypted.data(), reinterpret_cast<const unsigned char *>(text.c_str()), text.size(), nonce, their_pk, my_sk) != 0)
+{
+    std::cerr << "Encryption falied" << std::endl;
+    return false;
+}
+
+std::ofstream out(out_path, std::ios::binary);
+    if (!out)
+    {
+    std::cerr << "Cannot open output file " << std::endl;
+    return false;
+    }
+
+    out.write(reinterpret_cast<const char *>(my_pk), crypto_box_PUBLICKEYBYTES);
+    out.write(reinterpret_cast<const char *>(nonce), sizeof(nonce));
+    out.write(reinterpret_cast<const char *>(encrypted.data()),
+              static_cast<std::streamsize>(encrypted.size()));
+              out.close();
+    if (!out)
+    {
+        std::cerr << "Failed to write output file" << std::endl;
+        return false;
+    }
     return true;
 }
 
@@ -179,6 +220,15 @@ int main(int argc, char *argv[])
     char pk_hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
     sodium_bin2hex(pk_hex, sizeof(pk_hex), pk, sizeof(pk));
     std::cout << "Identity ready. Public Key: " << pk_hex << std::endl;
+
+    if (argc == 6 && std::string(argv[2]) == "send")
+    {
+        if (send_message(pk, sk, argv[3], argv[4], argv[5]))
+        {
+            return 1;
+        }
+        std::cout << "Message written to " << argv[5] << std::endl;
+    }
 
     if (!demo_message())
     {
