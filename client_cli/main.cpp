@@ -13,7 +13,7 @@ bool derive_key(const std::string &password, const unsigned char *salt, unsigned
 }
 
 bool load_identity(unsigned char* pk, unsigned char* sk) {
-    std::fstream in("identity.key", std::ios::binary);
+    std::ifstream in("identity.key", std::ios::binary);
     if (!in) {
         std::cerr << "Cannot open identity.key" << std::endl;
         return false;
@@ -47,6 +47,7 @@ bool load_identity(unsigned char* pk, unsigned char* sk) {
         std::cerr << "Wrong password or file was modified" << std::endl;
         return false;
     }
+    return true;
 }
 
 int main()
@@ -62,6 +63,7 @@ int main()
     std::ifstream in("identity.key", std::ios::binary);
     if (in)
     {
+        in.close();
         unsigned char pk[crypto_box_PUBLICKEYBYTES];
         unsigned char sk[crypto_box_SECRETKEYBYTES];
         if (!load_identity(pk, sk)) {
