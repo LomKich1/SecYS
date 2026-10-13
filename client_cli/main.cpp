@@ -50,6 +50,46 @@ bool load_identity(unsigned char* pk, unsigned char* sk) {
     return true;
 }
 
+bool create_identity(unsigned char* pk, unsigned char* sk) {
+    crypto_box_keypair(pk, sk);
+
+    std::string password;
+    std::cout << "Password: ";
+    std::getline(std::cin, password);
+
+    unsigned char salt[crypto_pwhash_SALTBYTES];
+    randombytes_buf(salt, sizeof(salt));
+
+    unsigned char key[crypto_secretbox_KEYBYTES];
+    if (!derive_key(password, salt, key)) {
+        std::cerr << "Not enough memory" << std::endl;
+        return false;
+    }
+
+    unsigned char nonce[crypto_secretbox_NONCEBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
+
+    unsigned char encrypted_sk[crypto_secretbox_MACBYTES + crypto_box_SECRETKEYBYTES];
+    crypto_secretbox_easy(encrypted_sk, sk, crypto_box_SECRETKEYBYTES, nonce, key);
+    sodium_memzero(key, sizeof(key));
+
+    std::ofstream out("identity.key", std::ios::binary);
+    if (!out) {
+        std::cerr << "Cannot open file" << std::endl;
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(salt), sizeof(salt));
+    out.write(reinterpret_cast<const char*>(nonce), sizeof(nonce));
+    out.write(reinterpret_cast<const char*>(pk), crypto_box_PUBLICKEYBYTES);
+    out.write(reinterpret_cast<const char*>(encrypted_sk), sizeof(encrypted_sk));
+    out.close();
+    if (!out) {
+        std::cerr << "Failed to write file" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 int main()
 {
     if (sodium_init() < 0)
