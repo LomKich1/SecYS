@@ -3,6 +3,14 @@
 #include <string>
 #include <fstream>
 
+bool derive_key(const std::string& password, const unsigned char* salt, unsigned char* key) {
+    return crypto_pwhash(key, crypto_secretbox_KEYBYTES,
+                      password.c_str(), password.size(),
+                      salt, crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                      crypto_pwhash_MEMLIMIT_INTERACTIVE,
+                      crypto_pwhash_ALG_ARGON2ID13) == 0;
+}
+
 int main() {
     if (sodium_init() < 0) {
         std::cerr << "Failed to initialize libsodium" << std::endl;
@@ -32,11 +40,7 @@ int main() {
         std::getline(std::cin, password);
 
         unsigned char key[crypto_secretbox_KEYBYTES];
-        if (crypto_pwhash(key, sizeof(key),
-                            password.c_str(), password.size(),
-                            salt, crypto_pwhash_OPSLIMIT_INTERACTIVE,
-                            crypto_pwhash_MEMLIMIT_INTERACTIVE,
-                            crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        if (!derive_key(password, salt, key)) {
             std::cerr << "Not enough memory" << std::endl;
             return 1;
         }
@@ -73,11 +77,7 @@ int main() {
     randombytes_buf(salt, sizeof(salt));
 
     unsigned char key[crypto_secretbox_KEYBYTES];
-    if (crypto_pwhash(key, sizeof(key),
-                        password.c_str(), password.size(),
-                        salt, crypto_pwhash_OPSLIMIT_INTERACTIVE,
-                        crypto_pwhash_MEMLIMIT_INTERACTIVE,
-                        crypto_pwhash_ALG_ARGON2ID13) != 0) {
+    if (!derive_key(password, salt, key)) {
             std::cerr << "Not enough memory" << std::endl;
             return 1;
         }
