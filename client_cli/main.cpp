@@ -13,9 +13,11 @@ bool derive_key(const std::string &password, const unsigned char *salt, unsigned
                          crypto_pwhash_ALG_ARGON2ID13) == 0;
 }
 
-bool load_identity(unsigned char* pk, unsigned char* sk) {
+bool load_identity(unsigned char *pk, unsigned char *sk)
+{
     std::ifstream in("identity.key", std::ios::binary);
-    if (!in) {
+    if (!in)
+    {
         std::cerr << "Cannot open identity.key" << std::endl;
         return false;
     }
@@ -23,11 +25,12 @@ bool load_identity(unsigned char* pk, unsigned char* sk) {
     unsigned char nonce[crypto_secretbox_NONCEBYTES];
     unsigned char encrypted_sk[crypto_secretbox_MACBYTES + crypto_box_SECRETKEYBYTES];
 
-    in.read(reinterpret_cast<char*>(salt), sizeof(salt));
-    in.read(reinterpret_cast<char*>(nonce), sizeof(nonce));
-    in.read(reinterpret_cast<char*>(pk), crypto_box_PUBLICKEYBYTES);
-    in.read(reinterpret_cast<char*>(encrypted_sk), sizeof(encrypted_sk));
-    if (!in) {
+    in.read(reinterpret_cast<char *>(salt), sizeof(salt));
+    in.read(reinterpret_cast<char *>(nonce), sizeof(nonce));
+    in.read(reinterpret_cast<char *>(pk), crypto_box_PUBLICKEYBYTES);
+    in.read(reinterpret_cast<char *>(encrypted_sk), sizeof(encrypted_sk));
+    if (!in)
+    {
         std::cerr << "File is too short or damaged" << std::endl;
         return false;
     }
@@ -37,21 +40,24 @@ bool load_identity(unsigned char* pk, unsigned char* sk) {
     std::getline(std::cin, password);
 
     unsigned char key[crypto_secretbox_KEYBYTES];
-    if (!derive_key(password, salt, key)) {
+    if (!derive_key(password, salt, key))
+    {
         std::cerr << "Not enough memory" << std::endl;
         return false;
     }
 
     bool ok = crypto_secretbox_open_easy(sk, encrypted_sk, sizeof(encrypted_sk), nonce, key) == 0;
     sodium_memzero(key, sizeof(key));
-    if (!ok) {
+    if (!ok)
+    {
         std::cerr << "Wrong password or file was modified" << std::endl;
         return false;
     }
     return true;
 }
 
-bool create_identity(unsigned char* pk, unsigned char* sk) {
+bool create_identity(unsigned char *pk, unsigned char *sk)
+{
     crypto_box_keypair(pk, sk);
 
     std::string password;
@@ -62,7 +68,8 @@ bool create_identity(unsigned char* pk, unsigned char* sk) {
     randombytes_buf(salt, sizeof(salt));
 
     unsigned char key[crypto_secretbox_KEYBYTES];
-    if (!derive_key(password, salt, key)) {
+    if (!derive_key(password, salt, key))
+    {
         std::cerr << "Not enough memory" << std::endl;
         return false;
     }
@@ -75,23 +82,26 @@ bool create_identity(unsigned char* pk, unsigned char* sk) {
     sodium_memzero(key, sizeof(key));
 
     std::ofstream out("identity.key", std::ios::binary);
-    if (!out) {
+    if (!out)
+    {
         std::cerr << "Cannot open file" << std::endl;
         return false;
     }
-    out.write(reinterpret_cast<const char*>(salt), sizeof(salt));
-    out.write(reinterpret_cast<const char*>(nonce), sizeof(nonce));
-    out.write(reinterpret_cast<const char*>(pk), crypto_box_PUBLICKEYBYTES);
-    out.write(reinterpret_cast<const char*>(encrypted_sk), sizeof(encrypted_sk));
+    out.write(reinterpret_cast<const char *>(salt), sizeof(salt));
+    out.write(reinterpret_cast<const char *>(nonce), sizeof(nonce));
+    out.write(reinterpret_cast<const char *>(pk), crypto_box_PUBLICKEYBYTES);
+    out.write(reinterpret_cast<const char *>(encrypted_sk), sizeof(encrypted_sk));
     out.close();
-    if (!out) {
+    if (!out)
+    {
         std::cerr << "Failed to write file" << std::endl;
         return false;
     }
     return true;
 }
 
-bool demo_message() {
+bool demo_message()
+{
     unsigned char alice_pk[crypto_box_PUBLICKEYBYTES];
     unsigned char alice_sk[crypto_box_SECRETKEYBYTES];
     unsigned char bob_pk[crypto_box_PUBLICKEYBYTES];
@@ -105,23 +115,29 @@ bool demo_message() {
     randombytes_buf(nonce, sizeof(nonce));
 
     std::vector<unsigned char> encrypted(crypto_box_MACBYTES + message.size());
-    encrypted[0] ^=1;
-    crypto_box_easy(encrypted.data(),
-reinterpret_cast<const unsigned char*>(message.c_str()),
-message.size(),
-nonce, bob_pk, alice_sk);
+    if (crypto_box_easy(encrypted.data(),
+                        reinterpret_cast<const unsigned char *>(message.c_str()),
+                        message.size(),
+                        nonce, bob_pk, alice_sk) != 0)
+    {
+        std::cerr << "Encryption failed" << std::endl;
+        return false;
+    }
 
-std::vector<unsigned char> decrypted(message.size());
-if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(),
+    encrypted[0] = 0; // Just to avoid unused variable warning
 
-nonce, alice_pk, bob_sk) != 0) {
-    std::cerr << "Messagr was forged or damaged" << std::endl;
-    return false;
-}
+    std::vector<unsigned char> decrypted(message.size());
+    if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(),
 
-std::string text(decrypted.begin(), decrypted.end());
-std::cout << "Bob read: " << text << std::endl;
-return true;
+                             nonce, alice_pk, bob_sk) != 0)
+    {
+        std::cerr << "Message was forged or damaged" << std::endl;
+        return false;
+    }
+
+    std::string text(decrypted.begin(), decrypted.end());
+    std::cout << "Bob read: " << text << std::endl;
+    return true;
 }
 
 int main()
@@ -142,18 +158,24 @@ int main()
     in.close();
 
     bool ok;
-    if (exists) {
+    if (exists)
+    {
         ok = load_identity(pk, sk);
-    } else {
+    }
+    else
+    {
         ok = create_identity(pk, sk);
     }
-    if (!ok) {
+    if (!ok)
+    {
         return 1;
     }
 
     char pk_hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
     sodium_bin2hex(pk_hex, sizeof(pk_hex), pk, sizeof(pk));
     std::cout << "Identity ready. Public Key: " << pk_hex << std::endl;
+
+    demo_message();
 
     sodium_memzero(sk, sizeof(sk));
     return 0;
