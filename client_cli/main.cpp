@@ -61,9 +61,7 @@ int main() {
     crypto_box_keypair(pk, sk);
 
     char pk_hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
-    char sk_hex[crypto_box_SECRETKEYBYTES * 2 + 1];
     sodium_bin2hex(pk_hex, sizeof(pk_hex), pk, sizeof(pk));
-    sodium_bin2hex(sk_hex, sizeof(sk_hex), sk, sizeof(sk));
 
     std::cout << "Public Key: " << pk_hex << std::endl;
 
@@ -83,9 +81,6 @@ int main() {
             std::cerr << "Not enough memory" << std::endl;
             return 1;
         }
-        
-        char key_hex[sizeof(key) * 2 + 1];
-        sodium_bin2hex(key_hex, sizeof(key_hex), key, sizeof(key));
 
         unsigned char nonce[crypto_secretbox_NONCEBYTES];
         randombytes_buf(nonce, sizeof(nonce));
