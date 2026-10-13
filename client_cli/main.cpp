@@ -13,12 +13,12 @@ bool derive_key(const std::string &password, const unsigned char *salt, unsigned
                          crypto_pwhash_ALG_ARGON2ID13) == 0;
 }
 
-bool load_identity(unsigned char *pk, unsigned char *sk)
+bool load_identity(const std::string &path, unsigned char *pk, unsigned char *sk)
 {
-    std::ifstream in("identity.key", std::ios::binary);
+    std::ifstream in(path, std::ios::binary);
     if (!in)
     {
-        std::cerr << "Cannot open identity.key" << std::endl;
+        std::cerr << "Cannot open " << path << std::endl;
         return false;
     }
     unsigned char salt[crypto_pwhash_SALTBYTES];
@@ -56,7 +56,7 @@ bool load_identity(unsigned char *pk, unsigned char *sk)
     return true;
 }
 
-bool create_identity(unsigned char *pk, unsigned char *sk)
+bool create_identity(const std::string &path, unsigned char *pk, unsigned char *sk)
 {
     crypto_box_keypair(pk, sk);
 
@@ -81,7 +81,7 @@ bool create_identity(unsigned char *pk, unsigned char *sk)
     crypto_secretbox_easy(encrypted_sk, sk, crypto_box_SECRETKEYBYTES, nonce, key);
     sodium_memzero(key, sizeof(key));
 
-    std::ofstream out("identity.key", std::ios::binary);
+    std::ofstream out(path, std::ios::binary);
     if (!out)
     {
         std::cerr << "Cannot open file" << std::endl;
@@ -138,8 +138,15 @@ bool demo_message()
     return true;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
+    if (argc < 2)
+    {
+        std::cerr << "Usage: secys_cli <identity-file>" << std::endl;
+        return 1;
+    }
+    const std::string identity_path = argv[1];
+
     if (sodium_init() < 0)
     {
         std::cerr << "Failed to initialize libsodium" << std::endl;
@@ -151,18 +158,18 @@ int main()
     unsigned char pk[crypto_box_PUBLICKEYBYTES];
     unsigned char sk[crypto_box_SECRETKEYBYTES];
 
-    std::ifstream in("identity.key", std::ios::binary);
+    std::ifstream in(identity_path, std::ios::binary);
     bool exists = in.is_open();
     in.close();
 
     bool ok;
     if (exists)
     {
-        ok = load_identity(pk, sk);
+        ok = load_identity(identity_path, pk, sk);
     }
     else
     {
-        ok = create_identity(pk, sk);
+        ok = create_identity(identity_path, pk, sk);
     }
     if (!ok)
     {
