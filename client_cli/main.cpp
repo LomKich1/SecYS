@@ -144,7 +144,7 @@ bool recv_message(const unsigned char *my_sk, const std::string &in_path)
     const std::uintmax_t total = std::filesystem::file_size(in_path, ec);
     if (ec)
     {
-        std::cerr << "Cannot read file message" << std::endl;
+        std::cerr << "Cannot read message file" << std::endl;
         return false;
     }
 
