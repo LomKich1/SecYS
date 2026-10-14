@@ -1,8 +1,13 @@
 #include <asio.hpp>
+#include <array>
+#include <cstdint>
 #include <iostream>
 #include <memory>
+#include <vector>
 
 using asio::ip::tcp;
+
+constexpr std::uint32_t kMaxFrameSize = 64 * 1024;
 
 class Session : public std::enable_shared_from_this<Session>
 {
@@ -17,30 +22,14 @@ public:
         {
             std::cout << "Client connected: " << ep << std::endl;
         }
-        do_read();
+        read_header();
     }
 
 private:
-    void do_read()
+    void read_header()
     {
         auto self = shared_from_this();
-        socket_.async_read_some(asio::buffer(data_),
-            [this, self](const asio::error_code &ec, size_t n)
-            {
-                if (ec)
-                {
-                    std::cout << "Client disconnected" << std::endl;
-                    return;
-                }
-                std::cout << "read " << n << " bytes" << std::endl;
-                do_write(n);
-            });
-    }
-
-    void do_write(size_t n)
-    {
-        auto self = shared_from_this();
-        asio::async_write(socket_, asio::buffer(data_, n),
+        asio::async_read(socket_, asio::buffer(header_),
             [this, self](const asio::error_code &ec, size_t)
             {
                 if (ec)
@@ -48,12 +37,58 @@ private:
                     std::cout << "Client disconnected" << std::endl;
                     return;
                 }
-                do_read();
+                const std::uint32_t length =
+                    (static_cast<std::uint32_t>(header_[0]) << 24) |
+                    (static_cast<std::uint32_t>(header_[1]) << 16) |
+                    (static_cast<std::uint32_t>(header_[2]) << 8) |
+                    static_cast<std::uint32_t>(header_[3]);
+                if (length > kMaxFrameSize)
+                {
+                    std::cout << "Frame too large (" << length << "), closing" << std::endl;
+                    return;
+                }
+                read_body(length);
+            });
+    }
+
+    void read_body(std::uint32_t length)
+    {
+        body_.resize(length);
+        auto self = shared_from_this();
+        asio::async_read(socket_, asio::buffer(body_),
+            [this, self](const asio::error_code &ec, size_t)
+            {
+                if (ec)
+                {
+                    std::cout << "Client disconnected" << std::endl;
+                    return;
+                }
+                std::cout << "frame " << body_.size() << " bytes" << std::endl;
+                write_frame();
+            });
+    }
+
+    void write_frame()
+    {
+        out_.assign(header_.begin(), header_.end());
+        out_.insert(out_.end(), body_.begin(), body_.end());
+        auto self = shared_from_this();
+        asio::async_write(socket_, asio::buffer(out_),
+            [this, self](const asio::error_code &ec, size_t)
+            {
+                if (ec)
+                {
+                    std::cout << "Client disconnected" << std::endl;
+                    return;
+                }
+                read_header();
             });
     }
 
     tcp::socket socket_;
-    char data_[1024];
+    std::array<unsigned char, 4> header_{};
+    std::vector<unsigned char> body_;
+    std::vector<unsigned char> out_;
 };
 
 class Server
