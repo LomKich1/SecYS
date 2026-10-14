@@ -1,10 +1,34 @@
+#include <asio.hpp>
 #include <sodium.h>
+#include "protocol.h"
 #include <iostream>
 #include <string>
 #include <fstream>
 #include <vector>
 #include <filesystem>
 #include <algorithm>
+#include <array>
+#include <cstdint>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#include <cwchar>
+#ifdef _MSC_VER
+#pragma comment(lib, "shell32.lib")
+#endif
+#endif
+
+using asio::ip::tcp;
+
+constexpr const char *kServerHost = "127.0.0.1";
+constexpr unsigned short kServerPort = 9000;
 
 bool derive_key(const std::string &password, const unsigned char *salt, unsigned char *key)
 {
@@ -208,15 +232,213 @@ bool recv_message(const unsigned char *my_sk, const std::string &in_path)
     }
     return decrypt_message(my_sk, blob);
 }
+bool write_frame(tcp::socket &socket, const std::vector<unsigned char> &payload)
+{
+    const auto length = static_cast<std::uint32_t>(payload.size());
+    std::vector<unsigned char> frame;
+    frame.reserve(4 + payload.size());
+    frame.push_back(static_cast<unsigned char>(length >> 24));
+    frame.push_back(static_cast<unsigned char>(length >> 16));
+    frame.push_back(static_cast<unsigned char>(length >> 8));
+    frame.push_back(static_cast<unsigned char>(length));
+    frame.insert(frame.end(), payload.begin(), payload.end());
+
+    asio::error_code ec;
+    asio::write(socket, asio::buffer(frame), ec);
+    return !ec;
+}
+bool read_frame(tcp::socket &socket, std::vector<unsigned char> &body)
+{
+    std::array<unsigned char, 4> header{};
+    asio::error_code ec;
+    asio::read(socket, asio::buffer(header), ec);
+    if (ec)
+    {
+        return false;
+    }
+
+    const std::uint32_t length =
+        (static_cast<std::uint32_t>(header[0]) << 24) |
+        (static_cast<std::uint32_t>(header[1]) << 16) |
+        (static_cast<std::uint32_t>(header[2]) << 8) |
+        static_cast<std::uint32_t>(header[3]);
+    if (length > protocol::kMaxFrameSize)
+    {
+        return false;
+    }
+
+    body.resize(length);
+    asio::read(socket, asio::buffer(body), ec);
+    return !ec;
+}
+bool connect_to_server(tcp::socket &socket)
+{
+    asio::error_code ec;
+    const auto address = asio::ip::make_address(kServerHost, ec);
+    if (!ec)
+    {
+        socket.connect(tcp::endpoint(address, kServerPort), ec);
+    }
+    if (ec)
+    {
+        std::cerr << "Cannot connect to server: " << ec.message() << std::endl;
+        return false;
+    }
+    return true;
+}
+bool register_on_server(tcp::socket &socket, const unsigned char *pk)
+{
+    std::vector<unsigned char> payload;
+    payload.push_back(protocol::kMsgRegister);
+    payload.insert(payload.end(), pk, pk + protocol::kPublicKeySize);
+
+    std::vector<unsigned char> reply;
+    if (!write_frame(socket, payload) || !read_frame(socket, reply))
+    {
+        std::cerr << "Connection to server lost" << std::endl;
+        return false;
+    }
+    if (reply.size() != 1 || reply[0] != protocol::kMsgOk)
+    {
+        std::cerr << "Server refused registration" << std::endl;
+        return false;
+    }
+    return true;
+}
+bool listen_for_messages(const unsigned char *pk, const unsigned char *sk)
+{
+    asio::io_context io;
+    tcp::socket socket(io);
+    if (!connect_to_server(socket) || !register_on_server(socket, pk))
+    {
+        return false;
+    }
+    std::cout << "Online. Waiting for messages (Ctrl+C to quit)..." << std::endl;
+
+    std::vector<unsigned char> frame;
+    while (read_frame(socket, frame))
+    {
+        if (frame.empty() || frame[0] != protocol::kMsgDeliver)
+        {
+            continue;
+        }
+        const std::vector<unsigned char> blob(frame.begin() + 1, frame.end());
+        decrypt_message(sk, blob);
+    }
+    std::cout << "Disconnected from server" << std::endl;
+    return true;
+}
+bool send_via_server(const unsigned char *my_pk, const unsigned char *my_sk, const std::string &their_pk_hex, const std::string &text)
+{
+    unsigned char their_pk[crypto_box_PUBLICKEYBYTES];
+    if (!parse_public_key_hex(their_pk_hex, their_pk))
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> blob;
+    if (!encrypt_message(my_pk, my_sk, their_pk_hex, text, blob))
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> payload;
+    payload.reserve(1 + protocol::kPublicKeySize + blob.size());
+    payload.push_back(protocol::kMsgSend);
+    payload.insert(payload.end(), their_pk, their_pk + protocol::kPublicKeySize);
+    payload.insert(payload.end(), blob.begin(), blob.end());
+    if (payload.size() > protocol::kMaxFrameSize)
+    {
+        std::cerr << "Message is too long" << std::endl;
+        return false;
+    }
+
+    asio::io_context io;
+    tcp::socket socket(io);
+    if (!connect_to_server(socket))
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> reply;
+    if (!write_frame(socket, payload) || !read_frame(socket, reply))
+    {
+        std::cerr << "Connection to server lost" << std::endl;
+        return false;
+    }
+
+    if (reply.size() == 1 && reply[0] == protocol::kMsgOk)
+    {
+        return true;
+    }
+    if (reply.size() == 2 && reply[0] == protocol::kMsgError && reply[1] == protocol::kErrNotOnline)
+    {
+        std::cerr << "Recipient is offline (offline delivery is not implemented yet)" << std::endl;
+        return false;
+    }
+    std::cerr << "Server refused the message" << std::endl;
+    return false;
+}
+
+#ifdef _WIN32
+struct ConsoleUtf8
+{
+    UINT old_cp;
+    ConsoleUtf8() : old_cp(GetConsoleOutputCP())
+    {
+        SetConsoleOutputCP(CP_UTF8);
+    }
+    ~ConsoleUtf8()
+    {
+        SetConsoleOutputCP(old_cp);
+    }
+};
+#endif
+
+// Аргументы командной строки всегда в UTF-8. На Windows обычный argv приходит в "ANSI"-кодировке (cp1251 и т.п.) и ломает кириллицу, поэтому берём настоящую строку в UTF-16 и конвертируем сами.
+std::vector<std::string> get_utf8_args(int argc, char *argv[])
+{
+    std::vector<std::string> args;
+#ifdef _WIN32
+    int wargc = 0;
+    LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (wargv != nullptr)
+    {
+        for (int i = 0; i < wargc; ++i)
+        {
+            const int wlen = static_cast<int>(wcslen(wargv[i]));
+            const int size = WideCharToMultiByte(CP_UTF8, 0, wargv[i], wlen, nullptr, 0, nullptr, nullptr);
+            std::string arg(static_cast<size_t>(size), '\0');
+            if (size > 0)
+            {
+                WideCharToMultiByte(CP_UTF8, 0, wargv[i], wlen, arg.data(), size, nullptr, nullptr);
+            }
+            args.push_back(std::move(arg));
+        }
+        LocalFree(wargv);
+        return args;
+    }
+#endif
+    for (int i = 0; i < argc; ++i)
+    {
+        args.emplace_back(argv[i]);
+    }
+    return args;
+}
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2)
+    #ifdef _WIN32
+    const ConsoleUtf8 console_utf8;
+    #endif
+    const std::vector<std::string> args = get_utf8_args(argc, argv);
+
+    if (args.size() < 2)
     {
         std::cerr << "Usage: secys_cli <identity-file>" << std::endl;
         return 1;
     }
-    const std::string identity_path = argv[1];
+    const std::string identity_path = args[1];
 
     if (sodium_init() < 0)
     {
@@ -251,26 +473,46 @@ int main(int argc, char *argv[])
     sodium_bin2hex(pk_hex, sizeof(pk_hex), pk, sizeof(pk));
     std::cout << "Identity ready. Public Key: " << pk_hex << std::endl;
 
-    if (argc == 6 && std::string(argv[2]) == "send")
+    if (args.size() == 6 && args[2] == "send")
     {
-        if (!send_message(pk, sk, argv[3], argv[4], argv[5]))
+        if (!send_message(pk, sk, args[3], args[4], args[5]))
         {
             return 1;
         }
-        std::cout << "Message written to " << argv[5] << std::endl;
+        std::cout << "Message written to " << args[5] << std::endl;
     }
 
-    else if (argc == 4 && std::string(argv[2]) == "recv")
+    else if (args.size() == 4 && args[2] == "recv")
     {
-        if (!recv_message(sk, argv[3]))
+        if (!recv_message(sk, args[3]))
         {
             return 1;
         }
     }
 
-    else if (argc > 2)
+    else if (args.size() == 3 && args[2] == "listen")
     {
-        std::cerr << "Usage: secys_cli <identity> send <their-pk-hex> <text> <out-file>\n" << "       secys_cli <identity> recv <in-file>" << std::endl;
+        if (!listen_for_messages(pk, sk))
+        {
+            return 1;
+        }
+    }
+
+    else if (args.size() == 5 && args[2] == "sendnet")
+    {
+        if (!send_via_server(pk, sk, args[3], args[4]))
+        {
+            return 1;
+        }
+        std::cout << "Message sent via server" << std::endl;
+    }
+
+    else if (args.size() > 2)
+    {
+        std::cerr << "Usage: secys_cli <identity> send <their-pk-hex> <text> <out-file>\n"
+                  << "       secys_cli <identity> recv <in-file>\n"
+                  << "       secys_cli <identity> listen\n"
+                  << "       secys_cli <identity> sendnet <their-pk-hex> <text>" << std::endl;
         return 1;
     }
 
