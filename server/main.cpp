@@ -1,18 +1,49 @@
 #include <asio.hpp>
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <deque>
+#include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using asio::ip::tcp;
 
 constexpr std::uint32_t kMaxFrameSize = 64 * 1024;
+constexpr size_t kPublicKeySize = 32;
+
+constexpr unsigned char kMsgRegister = 0x01;
+constexpr unsigned char kMsgOk = 0x10;
+constexpr unsigned char kMsgError = 0x11;
+
+constexpr unsigned char kErrBadFrame = 1;
+constexpr unsigned char kErrUnknownType = 2;
+
+using PublicKey = std::array<unsigned char, kPublicKeySize>;
+
+class Session;
+using Registry = std::map<PublicKey, std::weak_ptr<Session>>;
+
+std::string short_hex(const PublicKey &key)
+{
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < 4; ++i)
+    {
+        oss << std::setw(2) << static_cast<int>(key[i]);
+    }
+    return oss.str();
+}
 
 class Session : public std::enable_shared_from_this<Session>
 {
 public:
-    explicit Session(tcp::socket socket) : socket_(std::move(socket)) {}
+    Session(tcp::socket socket, Registry &registry)
+        : socket_(std::move(socket)), registry_(registry) {}
 
     void start()
     {
@@ -34,7 +65,7 @@ private:
             {
                 if (ec)
                 {
-                    std::cout << "Client disconnected" << std::endl;
+                    finish("Client disconnected");
                     return;
                 }
                 const std::uint32_t length =
@@ -44,7 +75,7 @@ private:
                     static_cast<std::uint32_t>(header_[3]);
                 if (length > kMaxFrameSize)
                 {
-                    std::cout << "Frame too large (" << length << "), closing" << std::endl;
+                    finish("Frame too large (" + std::to_string(length) + "), closing");
                     return;
                 }
                 read_body(length);
@@ -60,35 +91,130 @@ private:
             {
                 if (ec)
                 {
-                    std::cout << "Client disconnected" << std::endl;
+                    finish("Client disconnected");
                     return;
                 }
-                std::cout << "frame " << body_.size() << " bytes" << std::endl;
-                write_frame();
-            });
-    }
-
-    void write_frame()
-    {
-        out_.assign(header_.begin(), header_.end());
-        out_.insert(out_.end(), body_.begin(), body_.end());
-        auto self = shared_from_this();
-        asio::async_write(socket_, asio::buffer(out_),
-            [this, self](const asio::error_code &ec, size_t)
-            {
-                if (ec)
-                {
-                    std::cout << "Client disconnected" << std::endl;
-                    return;
-                }
+                handle_frame();
                 read_header();
             });
     }
 
+    void handle_frame()
+    {
+        if (body_.empty())
+        {
+            send_error(kErrBadFrame);
+            return;
+        }
+        switch (body_[0])
+        {
+        case kMsgRegister:
+            handle_register();
+            break;
+        default:
+            send_error(kErrUnknownType);
+            break;
+        }
+    }
+
+    void handle_register()
+    {
+        if (body_.size() != 1 + kPublicKeySize)
+        {
+            send_error(kErrBadFrame);
+            return;
+        }
+        unregister();
+        std::copy(body_.begin() + 1, body_.end(), pk_.begin());
+        registry_[pk_] = weak_from_this();
+        registered_ = true;
+        std::cout << "Registered " << short_hex(pk_) << "..." << std::endl;
+        send_frame({kMsgOk});
+    }
+
+    void unregister()
+    {
+        if (!registered_)
+        {
+            return;
+        }
+        registered_ = false;
+        const auto it = registry_.find(pk_);
+        if (it != registry_.end() && it->second.lock().get() == this)
+        {
+            registry_.erase(it);
+            std::cout << "Unregistered " << short_hex(pk_) << "..." << std::endl;
+        }
+    }
+
+    void send_error(unsigned char code)
+    {
+        send_frame({kMsgError, code});
+    }
+
+    void send_frame(const std::vector<unsigned char> &payload)
+    {
+        const auto length = static_cast<std::uint32_t>(payload.size());
+        std::vector<unsigned char> frame;
+        frame.reserve(4 + payload.size());
+        frame.push_back(static_cast<unsigned char>(length >> 24));
+        frame.push_back(static_cast<unsigned char>(length >> 16));
+        frame.push_back(static_cast<unsigned char>(length >> 8));
+        frame.push_back(static_cast<unsigned char>(length));
+        frame.insert(frame.end(), payload.begin(), payload.end());
+        out_queue_.push_back(std::move(frame));
+        if (!writing_)
+        {
+            writing_ = true;
+            do_write();
+        }
+    }
+
+    void do_write()
+    {
+        auto self = shared_from_this();
+        asio::async_write(socket_, asio::buffer(out_queue_.front()),
+            [this, self](const asio::error_code &ec, size_t)
+            {
+                if (ec)
+                {
+                    finish("Client disconnected");
+                    return;
+                }
+                out_queue_.pop_front();
+                if (out_queue_.empty())
+                {
+                    writing_ = false;
+                }
+                else
+                {
+                    do_write();
+                }
+            });
+    }
+
+    void finish(const std::string &reason)
+    {
+        if (finished_)
+        {
+            return;
+        }
+        finished_ = true;
+        std::cout << reason << std::endl;
+        unregister();
+        asio::error_code ignored;
+        socket_.close(ignored);
+    }
+
     tcp::socket socket_;
+    Registry &registry_;
     std::array<unsigned char, 4> header_{};
     std::vector<unsigned char> body_;
-    std::vector<unsigned char> out_;
+    std::deque<std::vector<unsigned char>> out_queue_;
+    bool writing_ = false;
+    bool finished_ = false;
+    bool registered_ = false;
+    PublicKey pk_{};
 };
 
 class Server
@@ -108,13 +234,14 @@ private:
             {
                 if (!ec)
                 {
-                    std::make_shared<Session>(std::move(socket))->start();
+                    std::make_shared<Session>(std::move(socket), registry_)->start();
                 }
                 do_accept();
             });
     }
 
     tcp::acceptor acceptor_;
+    Registry registry_;
 };
 
 int main()
