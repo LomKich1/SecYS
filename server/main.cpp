@@ -17,11 +17,14 @@ constexpr std::uint32_t kMaxFrameSize = 64 * 1024;
 constexpr size_t kPublicKeySize = 32;
 
 constexpr unsigned char kMsgRegister = 0x01;
+constexpr unsigned char kMsgSend = 0x02;
+constexpr unsigned char kMsgDeliver = 0x03;
 constexpr unsigned char kMsgOk = 0x10;
 constexpr unsigned char kMsgError = 0x11;
 
 constexpr unsigned char kErrBadFrame = 1;
 constexpr unsigned char kErrUnknownType = 2;
+constexpr unsigned char kErrNotOnline = 3;
 
 using PublicKey = std::array<unsigned char, kPublicKeySize>;
 
@@ -61,25 +64,63 @@ private:
     {
         auto self = shared_from_this();
         asio::async_read(socket_, asio::buffer(header_),
-            [this, self](const asio::error_code &ec, size_t)
-            {
-                if (ec)
-                {
-                    finish("Client disconnected");
-                    return;
-                }
-                const std::uint32_t length =
-                    (static_cast<std::uint32_t>(header_[0]) << 24) |
-                    (static_cast<std::uint32_t>(header_[1]) << 16) |
-                    (static_cast<std::uint32_t>(header_[2]) << 8) |
-                    static_cast<std::uint32_t>(header_[3]);
-                if (length > kMaxFrameSize)
-                {
-                    finish("Frame too large (" + std::to_string(length) + "), closing");
-                    return;
-                }
-                read_body(length);
-            });
+                         [this, self](const asio::error_code &ec, size_t)
+                         {
+                             if (ec)
+                             {
+                                 finish("Client disconnected");
+                                 return;
+                             }
+                             const std::uint32_t length =
+                                 (static_cast<std::uint32_t>(header_[0]) << 24) |
+                                 (static_cast<std::uint32_t>(header_[1]) << 16) |
+                                 (static_cast<std::uint32_t>(header_[2]) << 8) |
+                                 static_cast<std::uint32_t>(header_[3]);
+                             if (length > kMaxFrameSize)
+                             {
+                                 finish("Frame too large (" + std::to_string(length) + "), closing");
+                                 return;
+                             }
+                             read_body(length);
+                         });
+    }
+
+    void handle_send()
+    {
+        if (body_.size() < 1 + kPublicKeySize + 1)
+        {
+            send_error(kErrBadFrame);
+            return;
+        }
+        const auto key_end = body_.begin() + 1 + static_cast<std::ptrdiff_t>(kPublicKeySize);
+        PublicKey recipient{};
+        std::copy(body_.begin() + 1, key_end, recipient.begin());
+
+        std::shared_ptr<Session> target;
+        const auto it = registry_.find(recipient);
+        if (it != registry_.end())
+        {
+            target = it->second.lock();
+        }
+        if (!target)
+        {
+            send_error(kErrNotOnline);
+            return;
+        }
+
+        const std::vector<unsigned char> blob(key_end, body_.end());
+        target->deliver(blob);
+        std::cout << "Relayed " << blob.size() << " bytes to " << short_hex(recipient) << "..." << std::endl;
+        send_frame({kMsgOk});
+    }
+
+    void deliver(const std::vector<unsigned char> &blob)
+    {
+        std::vector<unsigned char> payload;
+        payload.reserve(1 + blob.size());
+        payload.push_back(kMsgDeliver);
+        payload.insert(payload.end(), blob.begin(), blob.end());
+        send_frame(payload);
     }
 
     void read_body(std::uint32_t length)
@@ -87,16 +128,16 @@ private:
         body_.resize(length);
         auto self = shared_from_this();
         asio::async_read(socket_, asio::buffer(body_),
-            [this, self](const asio::error_code &ec, size_t)
-            {
-                if (ec)
-                {
-                    finish("Client disconnected");
-                    return;
-                }
-                handle_frame();
-                read_header();
-            });
+                         [this, self](const asio::error_code &ec, size_t)
+                         {
+                             if (ec)
+                             {
+                                 finish("Client disconnected");
+                                 return;
+                             }
+                             handle_frame();
+                             read_header();
+                         });
     }
 
     void handle_frame()
@@ -110,6 +151,9 @@ private:
         {
         case kMsgRegister:
             handle_register();
+            break;
+        case kMsgSend:
+            handle_send();
             break;
         default:
             send_error(kErrUnknownType);
@@ -174,23 +218,23 @@ private:
     {
         auto self = shared_from_this();
         asio::async_write(socket_, asio::buffer(out_queue_.front()),
-            [this, self](const asio::error_code &ec, size_t)
-            {
-                if (ec)
-                {
-                    finish("Client disconnected");
-                    return;
-                }
-                out_queue_.pop_front();
-                if (out_queue_.empty())
-                {
-                    writing_ = false;
-                }
-                else
-                {
-                    do_write();
-                }
-            });
+                          [this, self](const asio::error_code &ec, size_t)
+                          {
+                              if (ec)
+                              {
+                                  finish("Client disconnected");
+                                  return;
+                              }
+                              out_queue_.pop_front();
+                              if (out_queue_.empty())
+                              {
+                                  writing_ = false;
+                              }
+                              else
+                              {
+                                  do_write();
+                              }
+                          });
     }
 
     void finish(const std::string &reason)
