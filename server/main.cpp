@@ -32,6 +32,7 @@ private:
                     std::cout << "Client disconnected" << std::endl;
                     return;
                 }
+                std::cout << "read " << n << " bytes" << std::endl;
                 do_write(n);
             });
     }
