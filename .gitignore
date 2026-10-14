@@ -3,4 +3,3 @@ vcpkg_installed/
 [Bb]uild/
 .vs/
 *.key
-tools/
