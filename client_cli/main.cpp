@@ -4,6 +4,7 @@
 #include <fstream>
 #include <vector>
 #include <filesystem>
+#include <algorithm>
 
 bool derive_key(const std::string &password, const unsigned char *salt, unsigned char *key)
 {
@@ -98,24 +99,71 @@ bool create_identity(const std::string &path, unsigned char *pk, unsigned char *
     }
     return true;
 }
-bool send_message(const unsigned char *my_pk, const unsigned char *my_sk, const std::string &their_pk_hex, const std::string &text, const std::string &out_path)
+bool parse_public_key_hex(const std::string &hex, unsigned char *out)
 {
-    unsigned char their_pk[crypto_box_PUBLICKEYBYTES];
     size_t decoded_len = 0;
-    if (sodium_hex2bin(their_pk, sizeof(their_pk), their_pk_hex.c_str(), their_pk_hex.size(), nullptr, &decoded_len, nullptr) != 0 ||
+    if (sodium_hex2bin(out, crypto_box_PUBLICKEYBYTES, hex.c_str(), hex.size(), nullptr, &decoded_len, nullptr) != 0 ||
         decoded_len != crypto_box_PUBLICKEYBYTES)
     {
         std::cerr << "Invalid public key (need 64 hex characters)" << std::endl;
         return false;
     }
+    return true;
+}
+bool encrypt_message(const unsigned char *my_pk, const unsigned char *my_sk, const std::string &their_pk_hex, const std::string &text, std::vector<unsigned char> &blob)
+{
+    unsigned char their_pk[crypto_box_PUBLICKEYBYTES];
+    if (!parse_public_key_hex(their_pk_hex, their_pk))
+    {
+        return false;
+    }
 
-    unsigned char nonce[crypto_box_NONCEBYTES];
-    randombytes_buf(nonce, sizeof(nonce));
+    blob.resize(crypto_box_PUBLICKEYBYTES + crypto_box_NONCEBYTES + crypto_box_MACBYTES + text.size());
+    unsigned char *nonce = blob.data() + crypto_box_PUBLICKEYBYTES;
+    unsigned char *ciphertext = nonce + crypto_box_NONCEBYTES;
 
-    std::vector<unsigned char> encrypted(crypto_box_MACBYTES + text.size());
-    if (crypto_box_easy(encrypted.data(), reinterpret_cast<const unsigned char *>(text.c_str()), text.size(), nonce, their_pk, my_sk) != 0)
+    std::copy(my_pk, my_pk + crypto_box_PUBLICKEYBYTES, blob.begin());
+    randombytes_buf(nonce, crypto_box_NONCEBYTES);
+
+    if (crypto_box_easy(ciphertext, reinterpret_cast<const unsigned char *>(text.c_str()), text.size(), nonce, their_pk, my_sk) != 0)
     {
         std::cerr << "Encryption failed" << std::endl;
+        return false;
+    }
+    return true;
+}
+bool decrypt_message(const unsigned char *my_sk, const std::vector<unsigned char> &blob)
+{
+    constexpr size_t header = crypto_box_PUBLICKEYBYTES + crypto_box_NONCEBYTES;
+    if (blob.size() < header + crypto_box_MACBYTES)
+    {
+        std::cerr << "Message too short" << std::endl;
+        return false;
+    }
+
+    const unsigned char *sender_pk = blob.data();
+    const unsigned char *nonce = blob.data() + crypto_box_PUBLICKEYBYTES;
+    const unsigned char *ciphertext = blob.data() + header;
+    const size_t ciphertext_len = blob.size() - header;
+
+    std::vector<unsigned char> decrypted(ciphertext_len - crypto_box_MACBYTES);
+    if (crypto_box_open_easy(decrypted.data(), ciphertext, ciphertext_len, nonce, sender_pk, my_sk) != 0)
+    {
+        std::cerr << "Message was forged or damaged" << std::endl;
+        return false;
+    }
+
+    char sender_hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
+    sodium_bin2hex(sender_hex, sizeof(sender_hex), sender_pk, crypto_box_PUBLICKEYBYTES);
+    std::cout << "From: " << sender_hex << std::endl;
+    std::cout << "Message: " << std::string(decrypted.begin(), decrypted.end()) << std::endl;
+    return true;
+}
+bool send_message(const unsigned char *my_pk, const unsigned char *my_sk, const std::string &their_pk_hex, const std::string &text, const std::string &out_path)
+{
+    std::vector<unsigned char> blob;
+    if (!encrypt_message(my_pk, my_sk, their_pk_hex, text, blob))
+    {
         return false;
     }
 
@@ -125,11 +173,7 @@ bool send_message(const unsigned char *my_pk, const unsigned char *my_sk, const 
         std::cerr << "Cannot open output file" << std::endl;
         return false;
     }
-
-    out.write(reinterpret_cast<const char *>(my_pk), crypto_box_PUBLICKEYBYTES);
-    out.write(reinterpret_cast<const char *>(nonce), sizeof(nonce));
-    out.write(reinterpret_cast<const char *>(encrypted.data()),
-              static_cast<std::streamsize>(encrypted.size()));
+    out.write(reinterpret_cast<const char *>(blob.data()), static_cast<std::streamsize>(blob.size()));
     out.close();
     if (!out)
     {
@@ -148,45 +192,21 @@ bool recv_message(const unsigned char *my_sk, const std::string &in_path)
         return false;
     }
 
-    const std::uintmax_t header = crypto_box_PUBLICKEYBYTES + crypto_box_NONCEBYTES;
-    if (total < header + crypto_box_MACBYTES)
-    {
-        std::cerr << "Message file too short" << std::endl;
-        return false;
-    }
-
     std::ifstream in(in_path, std::ios::binary);
     if (!in)
     {
-        std::cerr << "Cannot read message file" << std::endl;
+        std::cerr << "Cannot open message file" << std::endl;
         return false;
     }
 
-    unsigned char sender_pk[crypto_box_PUBLICKEYBYTES];
-    unsigned char nonce[crypto_box_NONCEBYTES];
-    std::vector<unsigned char> encrypted(static_cast<size_t>(total - header));
-
-    in.read(reinterpret_cast<char *>(sender_pk), sizeof(sender_pk));
-    in.read(reinterpret_cast<char *>(nonce), sizeof(nonce));
-    in.read(reinterpret_cast<char *>(encrypted.data()), static_cast<std::streamsize>(encrypted.size()));
+    std::vector<unsigned char> blob(static_cast<size_t>(total));
+    in.read(reinterpret_cast<char *>(blob.data()), static_cast<std::streamsize>(blob.size()));
     if (!in)
     {
         std::cerr << "Message file is damaged" << std::endl;
         return false;
     }
-
-    std::vector<unsigned char> decrypted(encrypted.size() - crypto_box_MACBYTES);
-    if (crypto_box_open_easy(decrypted.data(), encrypted.data(), encrypted.size(), nonce, sender_pk, my_sk) != 0)
-    {
-        std::cerr << "Message was forged or damaged" << std::endl;
-        return false;
-    }
-
-    char sender_hex[crypto_box_PUBLICKEYBYTES * 2 + 1];
-    sodium_bin2hex(sender_hex, sizeof(sender_hex), sender_pk, sizeof(sender_pk));
-    std::cout << "From: " << sender_hex << std::endl;
-    std::cout << "Message: " << std::string(decrypted.begin(), decrypted.end()) << std::endl;
-    return true;
+    return decrypt_message(my_sk, blob);
 }
 
 int main(int argc, char *argv[])
